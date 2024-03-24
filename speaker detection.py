@@ -1,3 +1,4 @@
+import streamlit as st
 import speech_recognition as sr
 import requests
 from bs4 import BeautifulSoup
@@ -6,43 +7,45 @@ from collections import Counter
 from heapq import nlargest
 import string
 import datetime
-from google.cloud import translate_v2 as translate
+from deep_translator import GoogleTranslator
+from pyAudioAnalysis import audioSegmentation
 
 # Load the English NLP model
 nlp = spacy.load("en_core_web_sm")
 
 def recognize_speech_from_file(audio_file_path, language='en-IN'):
     """
-    Recognizes speech input from an audio file.
+    Recognizes speech input from an audio file and performs speaker diarization.
 
     Args:
         audio_file_path (str): Path to the audio file.
         language (str, optional): Language code for speech recognition. Defaults to 'en-IN' (English India).
 
     Returns:
-        str: Recognized text, or None if unable to recognize.
+        str: Recognized text with speaker labels, or None if unable to recognize.
     """
     recognizer = sr.Recognizer()
 
     with sr.AudioFile(audio_file_path) as source:
         audio = recognizer.record(source)  # Read the entire audio file
 
-    try:
-        if language == 'en-IN':
-            recognized_text = recognizer.recognize_google(audio, language=language)
-        elif language == 'hi-IN':
-            recognized_text = recognizer.recognize_google(audio, language=language)
-        elif language == 'or-IN':
-            print("Listening for Odia speech...")
-        else:
-            recognized_text = None
-            print("Language not supported")
-    except sr.UnknownValueError:
-        recognized_text = None
-        print("Unable to recognize speech")
+    # Perform speaker diarization using pyAudioAnalysis
+    segments = audioSegmentation.speaker_diarization(audio_file_path)
 
-    return recognized_text
+    recognized_text = []
+    previous_speaker = None
 
+    for seg in segments:
+        speaker = seg[2]
+        speech = seg[3]
+
+        if speaker != previous_speaker:
+            recognized_text.append(f"\nSpeaker {speaker}:")  # Add speaker label
+            previous_speaker = speaker
+
+        recognized_text.append(speech)
+
+    return " ".join(recognized_text)
 
 def preprocess_text(text):
     """
@@ -59,7 +62,6 @@ def preprocess_text(text):
     tokens = [token.lemma_ for token in doc if not token.is_stop and not token.is_punct]
     return tokens
 
-
 def extract_keywords(text, num_keywords=5):
     """
     Extracts top keywords from text using word frequency.
@@ -74,7 +76,6 @@ def extract_keywords(text, num_keywords=5):
 
     word_freq = Counter(text)
     return nlargest(num_keywords, word_freq, key=word_freq.get)
-
 
 def generate_summary(text, num_sentences=3):
     """
@@ -93,25 +94,22 @@ def generate_summary(text, num_sentences=3):
     summary = " ".join(sentences[:num_sentences])
     return summary
 
-
-def search_web(topic):
+def search_web(translated_text):
     """
-    Searches the web for news articles related to the provided topic.
+    Searches the web for news articles related to the translated text.
 
     Args:
-        topic (str): Topic to search for.
+        translated_text (str): Translated text to use as the search topic.
 
     Returns:
         list: List of news article snippets.
     """
-
-    url = f"https://www.google.com/search?q={topic}&tbm=nws"
+    url = f"https://www.google.com/search?q={translated_text}&tbm=nws"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers)
     soup = BeautifulSoup(response.text, 'html.parser')
     news_results = soup.find_all('div', class_='BNeawe vvjwJb AP7Wnd')
     return [result.get_text() for result in news_results]
-
 
 def get_timestamp():
     """
@@ -123,72 +121,63 @@ def get_timestamp():
 
     return datetime.datetime.now().strftime('%Y-%m-%d')
 
-
-def save_minutes(meeting_minutes, filename="meeting_minutes.txt"):
+def save_minutes(recognized_text, filename="meeting_minutes.txt"):
     """
-    Saves meeting minutes to a text file, with timestamps for each speech segment.
+    Saves meeting minutes, including speaker labels, to a text file.
 
     Args:
-        meeting_minutes (list): List of meeting speech segments.
+        recognized_text (str): Recognized text with speaker labels.
         filename (str, optional): Name of the output file. Defaults to "meeting_minutes.txt".
     """
 
     timestamp = get_timestamp()
     with open(f"{filename}-{timestamp}", "w") as file:
-        for i, speech in enumerate(meeting_minutes):
-            file.write(f"Segment {i + 1}:\n{speech}\n\n")
+        file.write(recognized_text)
 
-
-def translate_text(text, src_language='hi-IN', dest_language='en'):
+def translate_text(text, dest_language='en'):
     """
-    Translates text to the target language using Google Cloud Translate API.
+    Translates text to the target language using Google Translator.
 
     Args:
         text (str): Text to be translated.
-        src_language (str, optional): Source language code. Defaults to 'hi-IN' (Hindi India).
         dest_language (str, optional): Target language code. Defaults to 'en' (English).
 
     Returns:
         str: Translated text.
     """
-    try:
-        translate_client = translate.Client()
-        result = translate_client.translate(text, source_language=src_language, target_language=dest_language)
-        translated_text = result['translatedText']
-        return translated_text
-    except Exception as e:
-        print(f"Translation error: {e}")
-        return None
+    translated_text = GoogleTranslator(source='hi-EN', target=dest_language).translate(text)
+    return translated_text
 
+# Streamlit app
+st.title("Speech to Text Translation and Analysis")
 
+# Audio file upload
+uploaded_file = st.file_uploader("Upload an audio file", type=["wav", "mp3"])
 
-# Example usage:
-audio_file_path = r"D:\Hinglish Sample Audio.m4a.wav" # Replace this with the path to your audio file
-recognized_text = recognize_speech_from_file(audio_file_path)
-print("Recognized Text:", recognized_text)
+if uploaded_file:
+    st.audio(uploaded_file, format='audio/wav', start_time=0)
 
-if recognized_text:
-    translated_text = translate_text(recognized_text, src_language='hi', dest_language='en')
-    print("Translated Text:", translated_text)
+    recognized_text = recognize_speech_from_file(uploaded_file)
+    if recognized_text:
+        st.write("Recognized Text with Speaker Labels:")
+        st.write(recognized_text)
 
-    if translated_text:
-        preprocessed_text = preprocess_text(translated_text)
-        print("Preprocessed Text:", preprocessed_text)
+        translated_text = translate_text(recognized_text, dest_language='en')
+        if translated_text:
+            st.write("Translated Text:", translated_text)
 
-        keywords = extract_keywords(preprocessed_text)
-        print("Keywords:", keywords)
+            preprocessed_text = preprocess_text(translated_text)
+            st.write("Preprocessed Text:", preprocessed_text)
 
-        summary = generate_summary(translated_text)
-        print("Summary:", summary)
+            keywords = extract_keywords(preprocessed_text)
+            st.write("Keywords:", keywords)
 
-        topic = keywords[0] if keywords else "general"
-        news_articles = search_web(topic)
-        print("News Articles:", news_articles)
+            summary = generate_summary(translated_text)
+            st.write("Summary:", summary)
 
-        # Saving meeting minutes to a file
-        save_minutes([translated_text])
-        print("Meeting minutes saved to file.")
-    else:
-        print("Translation failed.")
-else:
-    print("No speech recognized.")
+            news_articles = search_web(translated_text)
+            st.write("News Articles:", news_articles)
+
+            # Saving meeting minutes to a file
+            save_minutes(recognized_text)
+            st.write("Meeting minutes with speaker labels saved to file.")
